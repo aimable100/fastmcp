@@ -216,12 +216,12 @@ class Task(abc.ABC, Generic[TaskResultT]):
         on status changes when server sends notifications/tasks/status.
 
         Args:
-            state: Desired state ('submitted', 'working', 'completed', 'failed').
-                   If None, waits for any terminal state (completed/failed)
+            state: Desired state (e.g. 'completed', 'input_required', 'failed').
+                   If None, waits for the task to leave the 'working' state.
             timeout: Maximum time to wait in seconds
 
         Returns:
-            GetTaskResult: Final task status
+            GetTaskResult: Task status at the time wait() returns
 
         Raises:
             TimeoutError: If desired state not reached within timeout
@@ -237,7 +237,7 @@ class Task(abc.ABC, Generic[TaskResultT]):
             self._status_event = asyncio.Event()
 
         start = time.time()
-        terminal_states = {"completed", "failed", "cancelled"}
+        in_progress_states = {"working"}
         poll_interval = 0.5  # Fallback polling interval (500ms)
 
         while True:
@@ -245,7 +245,7 @@ class Task(abc.ABC, Generic[TaskResultT]):
             if self._status_cache:
                 current = self._status_cache.status
                 if state is None:
-                    if current in terminal_states:
+                    if current not in in_progress_states:
                         return self._status_cache
                 elif current == state:
                     return self._status_cache
@@ -254,7 +254,7 @@ class Task(abc.ABC, Generic[TaskResultT]):
             elapsed = time.time() - start
             if elapsed >= timeout:
                 raise TimeoutError(
-                    f"Task {self._task_id} did not reach {state or 'terminal state'} within {timeout}s"
+                    f"Task {self._task_id} did not reach {state or 'a non-working state'} within {timeout}s"
                 )
 
             remaining = timeout - elapsed
@@ -353,8 +353,14 @@ class ToolTask(Task["CallToolResult"]):
             # Check client connected
             self._check_client_connected()
 
-            # Wait for completion using event-based wait (respects notifications)
-            await self.wait()
+            # Wait for task to leave working state (respects notifications)
+            status = await self.wait()
+
+            if status.status not in ("completed", "failed"):
+                raise RuntimeError(
+                    f"Task '{self._tool_name}' cannot return a result"
+                    f" (current state: {status.status})"
+                )
 
             # Get the raw result (dict or CallToolResult)
             raw_result = await self._client.get_task_result(self._task_id)
@@ -444,8 +450,14 @@ class PromptTask(Task[mcp.types.GetPromptResult]):
             # Check client connected
             self._check_client_connected()
 
-            # Wait for completion using event-based wait (respects notifications)
-            await self.wait()
+            # Wait for task to leave working state (respects notifications)
+            status = await self.wait()
+
+            if status.status not in ("completed", "failed"):
+                raise RuntimeError(
+                    f"Task '{self._prompt_name}' cannot return a result"
+                    f" (current state: {status.status})"
+                )
 
             # Get the raw MCP result
             mcp_result = await self._client.get_task_result(self._task_id)
@@ -516,8 +528,14 @@ class ResourceTask(
             # Check client connected
             self._check_client_connected()
 
-            # Wait for completion using event-based wait (respects notifications)
-            await self.wait()
+            # Wait for task to leave working state (respects notifications)
+            status = await self.wait()
+
+            if status.status not in ("completed", "failed"):
+                raise RuntimeError(
+                    f"Task '{self._uri}' cannot return a result"
+                    f" (current state: {status.status})"
+                )
 
             # Get the raw MCP result
             mcp_result = await self._client.get_task_result(self._task_id)
